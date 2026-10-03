@@ -4,3 +4,4 @@
 /credentials.json
 /.env
 *.png
+/allowed_users.json

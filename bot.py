@@ -1,5 +1,7 @@
 import os
 import io
+import re
+import json
 import logging
 import asyncio
 import requests
@@ -12,6 +14,7 @@ from telegram.ext import (
 )
 from dotenv import load_dotenv
 
+# Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -20,19 +23,67 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-
+# Состояния диалога
 QUEST_NAME, PARTICIPANTS_COUNT, REQUIRED_COUNT = range(3)
 
+# Константы для генерации обложки
 IMAGE_WIDTH = 1400
 IMAGE_HEIGHT = 350
-BACKGROUND_COLOR = (16, 53, 71)  # Темный синий цвет
-TEXT_COLOR = (248, 241, 222)  # Белый текст
-ACCENT_COLOR = (253, 188, 58)  # Золотой/желтый цвет
+BACKGROUND_COLOR = (16, 53, 71)  # Тёмно-синий
+TEXT_COLOR = (248, 241, 222)  # Бежевый / Белый
+ACCENT_COLOR = (253, 188, 58)  # Золотой / Жёлтый
+
+# Файл для сохранения разрешённых пользователей
+USERS_FILE = 'allowed_users.json'
+ADMIN_USER_ID = int(os.environ.get('ADMIN_USER_ID', 0))  # ID главного администратора
 
 
-ALLOWED_USERS = os.environ.get('ALLOWED_USERS', '').split(',')
-ALLOWED_USERS = [int(user_id.strip()) for user_id in ALLOWED_USERS if user_id.strip()]
-ADMIN_USER_ID = int(os.environ.get('ADMIN_USER_ID', 0))  # ID для административных функций
+def load_allowed_users() -> set:
+    """Загружает список разрешенных пользователей из файла или .env"""
+    if os.path.exists(USERS_FILE):
+        try:
+            with open(USERS_FILE, 'r', encoding='utf-8') as f:
+                users = json.load(f)
+                return set(int(u) for u in users)
+        except Exception as e:
+            logger.error(f"Ошибка при чтении {USERS_FILE}: {e}")
+
+    # Резервный вариант: из переменной окружения
+    env_users = os.environ.get('ALLOWED_USERS', '').split(',')
+    parsed_users = {int(u.strip()) for u in env_users if u.strip().isdigit()}
+    if ADMIN_USER_ID:
+        parsed_users.add(ADMIN_USER_ID)
+
+    # Сохраняем исходный список во внешнем файле
+    save_allowed_users(parsed_users)
+    return parsed_users
+
+
+def save_allowed_users(users: set) -> None:
+    """Сохраняет список разрешенных пользователей в файл"""
+    try:
+        with open(USERS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(list(users), f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении {USERS_FILE}: {e}")
+
+
+# Глобальный сет авторизованных пользователей
+ALLOWED_USERS = load_allowed_users()
+
+
+def check_access(user_id: int) -> bool:
+    """Проверка прав доступа к функции создания формы"""
+    return user_id in ALLOWED_USERS or user_id == ADMIN_USER_ID
+
+
+async def access_denied(update: Update) -> None:
+    """Сообщение об отказе в доступе"""
+    await update.message.reply_text(
+        "Доступ запрещен.\n\n"
+        "Обратитесь к администратору для получения доступа."
+    )
+
 
 MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
     [["📝 Создать форму"]],
@@ -41,26 +92,14 @@ MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
 )
 
 
-def check_access(user_id: int) -> bool:
-    print("user is admin")
-    return user_id in ALLOWED_USERS
-
-
-async def access_denied(update: Update) -> None:
-    await update.message.reply_text(
-        "Доступ запрещен.\n\n"
-        "Обратитесь к @deviyann для получения доступа."
-    )
-
-
 def split_text_to_lines(text: str) -> tuple:
+    """Форматирование и разделение текста для картинки"""
     text = text.replace('"', '«', 1)
     text = text.replace('"', '»', 1)
 
     if '«' in text and '»' in text:
         before_quotes = text[:text.index('«')].strip().upper()
         quoted_part = text[text.index('«'):text.index('»') + 1].upper()
-
         return before_quotes, quoted_part
     else:
         words = text.split()
@@ -70,18 +109,14 @@ def split_text_to_lines(text: str) -> tuple:
         mid = len(words) // 2
         line1 = " ".join(words[:mid]).upper()
         line2 = " ".join(words[mid:]).upper()
-
         return line1, line2
-
-
-import re
 
 
 async def send_image_as_both_photo_and_file(update: Update, image_buffer: io.BytesIO, quest_name: str,
                                             caption: str = ""):
+    """Отправка сгенерированного изображения файлом и картинкой"""
     safe_name = re.sub(r'[^\w\s-]', '', quest_name)
-    safe_name = re.sub(r'[-\s]+', '_', safe_name)
-    safe_name = safe_name.strip('-_')
+    safe_name = re.sub(r'[-\s]+', '_', safe_name).strip('-_')
 
     if len(safe_name) > 50:
         safe_name = safe_name[:50]
@@ -89,22 +124,21 @@ async def send_image_as_both_photo_and_file(update: Update, image_buffer: io.Byt
     filename = f"{safe_name}.png"
 
     image_buffer.seek(0)
-
     await update.message.reply_photo(
         photo=image_buffer,
         caption=caption
     )
 
-
     image_buffer.seek(0)
-
     await update.message.reply_document(
         document=image_buffer,
         filename=filename,
         caption="📎 А это тот же файл в формате PNG для скачивания"
     )
 
+
 def generate_quest_image(quest_name: str) -> io.BytesIO:
+    """Генерация баннера формы"""
     img = Image.new('RGB', (IMAGE_WIDTH, IMAGE_HEIGHT), BACKGROUND_COLOR)
     draw = ImageDraw.Draw(img)
 
@@ -112,8 +146,7 @@ def generate_quest_image(quest_name: str) -> io.BytesIO:
         font_subtitle = ImageFont.truetype("Montserrat-Black.ttf", 58.3)
         font_main = ImageFont.truetype("Montserrat-Black.ttf", 95)
         font_footer = ImageFont.truetype("Montserrat-Bold.ttf", 37.23)
-    except:
-        print("ahhh")
+    except Exception:
         font_subtitle = ImageFont.truetype("arialbd.ttf", 50)
         font_main = ImageFont.truetype("arialbd.ttf", 95)
         font_footer = ImageFont.truetype("arial.ttf", 28)
@@ -136,10 +169,11 @@ def generate_quest_image(quest_name: str) -> io.BytesIO:
     )
 
     curr_size = 95
-    q_font = ImageFont.truetype("Montserrat-Black.ttf", 95)
-
     while True:
-        q_font = ImageFont.truetype("Montserrat-Black.ttf", curr_size)
+        try:
+            q_font = ImageFont.truetype("Montserrat-Black.ttf", curr_size)
+        except Exception:
+            q_font = ImageFont.truetype("arialbd.ttf", curr_size)
 
         bbox = draw.textbbox((0, 0), line2.upper(), font=q_font)
         text_width = bbox[2] - bbox[0]
@@ -156,22 +190,9 @@ def generate_quest_image(quest_name: str) -> io.BytesIO:
         anchor="mt"
     )
 
-    # подпись внизу
-    draw.text(
-        (30.5, 30),
-        "bsuirhostel.5",
-        font=font_footer,
-        fill=(76, 107, 125, 80),
-        anchor="lt"
-    )
-
-    draw.text(
-        (1118.33, 30),
-        "bsuirhostel.5",
-        font=font_footer,
-        fill=(76, 107, 125, 80),
-        anchor="lt"
-    )
+    # Подпись по краям
+    draw.text((30.5, 30), "bsuirhostel.5", font=font_footer, fill=(76, 107, 125, 80), anchor="lt")
+    draw.text((1118.33, 30), "bsuirhostel.5", font=font_footer, fill=(76, 107, 125, 80), anchor="lt")
 
     img_io = io.BytesIO()
     img.save(img_io, format='PNG')
@@ -179,11 +200,13 @@ def generate_quest_image(quest_name: str) -> io.BytesIO:
     return img_io
 
 
-def call_google_script(quest_name, count, req_count):
+def call_google_script(quest_name: str, count: int, req_count: int) -> dict:
+    """Вызов скрипта Google Apps Script"""
     script_url = os.environ.get('GOOGLE_SCRIPT_URL')
     folder_id = os.environ.get('GOOGLE_DRIVE_FOLDER_ID')
 
-    if not script_url: raise ValueError("Нет URL скрипта")
+    if not script_url:
+        raise ValueError("Нет URL скрипта GOOGLE_SCRIPT_URL")
 
     payload = {
         "questName": quest_name,
@@ -193,55 +216,105 @@ def call_google_script(quest_name, count, req_count):
     }
 
     response = requests.post(script_url, json=payload)
-
     if response.status_code == 200:
         return response.json()
     else:
         raise Exception(f"HTTP {response.status_code}: {response.text}")
 
 
+# --- Команды администратора ---
+
 async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not check_access(update.effective_user.id):
-        await access_denied(update)
-        return
-
+    """Меню команд администратора"""
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Эта команда только для администратора.")
+        await update.message.reply_text("Эта команда только для главного администратора.")
         return
 
-    user_list = "\n".join([f"• {user_id}" for user_id in ALLOWED_USERS])
+    user_list = "\n".join([f"• `{u}`" for u in ALLOWED_USERS]) if ALLOWED_USERS else "Список пуст"
 
     await update.message.reply_text(
         f"🛠️ <b>Административные команды:</b>\n\n"
         f"<b>Текущие пользователи:</b>\n{user_list}\n\n"
-        f"<b>Команды:</b>\n"
-        f"/users - Показать список пользователей\n"
-        f"/stats - Статистика использования",
+        f"<b>Управление:</b>\n"
+        f"/users — Показать список пользователей\n"
+        f"/add_user <code>&lt;id&gt;</code> — Добавить доступ по Telegram ID\n"
+        f"/del_user <code>&lt;id&gt;</code> — Удалить доступ",
         parse_mode='HTML',
         reply_markup=MAIN_MENU_KEYBOARD
     )
 
 
 async def show_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not check_access(update.effective_user.id):
-        await access_denied(update)
-        return
-
+    """Вывод всех разрешенных пользователей"""
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Эта команда только для администратора.")
+        await update.message.reply_text("Эта команда только для главного администратора.")
         return
 
     if not ALLOWED_USERS:
         await update.message.reply_text("Список пользователей пуст.", reply_markup=MAIN_MENU_KEYBOARD)
         return
 
-    user_list = "\n".join([f"• {user_id}" for user_id in ALLOWED_USERS])
+    user_list = "\n".join([f"• <code>{user_id}</code>" for user_id in ALLOWED_USERS])
     await update.message.reply_text(
-        f"📋 <b>Разрешенные пользователи:</b>\n\n{user_list}",
+        f"📋 <b>Разрешенные пользователи ({len(ALLOWED_USERS)}):</b>\n\n{user_list}",
         parse_mode='HTML',
         reply_markup=MAIN_MENU_KEYBOARD
     )
 
+
+async def add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Добавление нового пользователя в список доступа"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("Эта команда только для главного администратора.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ Укажите Telegram ID.\nПример: <code>/add_user 123456789</code>",
+                                        parse_mode='HTML')
+        return
+
+    try:
+        new_id = int(context.args[0])
+        if new_id in ALLOWED_USERS:
+            await update.message.reply_text(f"Пользователь <code>{new_id}</code> уже в списке.", parse_mode='HTML')
+            return
+
+        ALLOWED_USERS.add(new_id)
+        save_allowed_users(ALLOWED_USERS)
+        await update.message.reply_text(f"✅ Пользователь <code>{new_id}</code> успешно добавлен!", parse_mode='HTML')
+    except ValueError:
+        await update.message.reply_text("❌ Ошибка: ID должен быть числом.")
+
+
+async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаление пользователя из списка доступа"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("Эта команда только для главного администратора.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ Укажите Telegram ID.\nПример: <code>/del_user 123456789</code>",
+                                        parse_mode='HTML')
+        return
+
+    try:
+        target_id = int(context.args[0])
+        if target_id == ADMIN_USER_ID:
+            await update.message.reply_text("❌ Нельзя удалить самого главного администратора.")
+            return
+
+        if target_id in ALLOWED_USERS:
+            ALLOWED_USERS.remove(target_id)
+            save_allowed_users(ALLOWED_USERS)
+            await update.message.reply_text(f"🗑 Пользователь <code>{target_id}</code> удалён из списка.",
+                                            parse_mode='HTML')
+        else:
+            await update.message.reply_text("Пользователь не найден в списке.")
+    except ValueError:
+        await update.message.reply_text("❌ Ошибка: ID должен быть числом.")
+
+
+# --- Основные функции и ConversationHandler ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_access(update.effective_user.id):
@@ -250,32 +323,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "Привет! Я бот для создания форм регистрации на мероприятия.\n\n"
-        "Используй кнопку ниже чтобы начать создание формы:",
+        "Используй кнопку ниже, чтобы начать создание формы:",
         reply_markup=MAIN_MENU_KEYBOARD
     )
     return ConversationHandler.END
 
 
-async def create_form(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not check_access(update.effective_user.id):
-        await access_denied(update)
-        return ConversationHandler.END
-
-    await update.message.reply_text(
-        "Привет! Введи название мероприятия:",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    return QUEST_NAME
-
-
-async def create_form_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def create_form_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_access(update.effective_user.id):
         await access_denied(update)
         return ConversationHandler.END
 
     await update.message.reply_text(
         "Отлично! Введи название мероприятия:",
-        reply_markup=ReplyKeyboardRemove() 
+        reply_markup=ReplyKeyboardRemove()
     )
     return QUEST_NAME
 
@@ -303,7 +364,8 @@ async def get_participants_count(update: Update, context: ContextTypes.DEFAULT_T
 
         context.user_data['count'] = count
         await update.message.reply_text(
-            f"Теперь введи МИНИМАЛЬНОЕ количество участников в команде (должно быть не больше {count}):")
+            f"Теперь введи МИНИМАЛЬНОЕ количество участников в команде (от 1 до {count}):"
+        )
         return REQUIRED_COUNT
 
     except ValueError:
@@ -328,7 +390,6 @@ async def get_required_count(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         status_msg = await update.message.reply_text("🎨 Генерирую картинку...")
         img_io = generate_quest_image(quest_name)
-
 
         await send_image_as_both_photo_and_file(
             update=update,
@@ -355,31 +416,23 @@ async def get_required_count(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     f"2. Загрузи картинку, которую я прислал, в Шапку темы."
                 )
                 await status_msg.edit_text(text, disable_web_page_preview=True)
-
                 await update.message.reply_text(
                     "🎉 Форма готова! Хочешь создать еще одну?",
                     reply_markup=MAIN_MENU_KEYBOARD
                 )
             else:
                 await status_msg.edit_text(f"⚠️ Ошибка скрипта: {result.get('message')}")
-                await update.message.reply_text(
-                    "Попробуй еще раз:",
-                    reply_markup=MAIN_MENU_KEYBOARD
-                )
+                await update.message.reply_text("Попробуй еще раз:", reply_markup=MAIN_MENU_KEYBOARD)
 
         except Exception as e:
             logger.error(f"Error: {e}")
-            await status_msg.edit_text(f"❌ Ошибка соединения.")
-
-            await update.message.reply_text(
-                "Произошла ошибка. Попробуй еще раз:",
-                reply_markup=MAIN_MENU_KEYBOARD
-            )
+            await status_msg.edit_text("❌ Ошибка соединения при вызове Google Script.")
+            await update.message.reply_text("Произошла ошибка. Попробуй еще раз:", reply_markup=MAIN_MENU_KEYBOARD)
 
         return ConversationHandler.END
 
     except ValueError:
-        await update.message.reply_text("Нужно число.")
+        await update.message.reply_text("Нужно ввести число.")
         return REQUIRED_COUNT
 
 
@@ -388,10 +441,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await access_denied(update)
         return ConversationHandler.END
 
-    await update.message.reply_text(
-        "Отмена. Возвращаю в главное меню.",
-        reply_markup=MAIN_MENU_KEYBOARD
-    )
+    await update.message.reply_text("Отмена. Возвращаю в главное меню.", reply_markup=MAIN_MENU_KEYBOARD)
     return ConversationHandler.END
 
 
@@ -401,29 +451,25 @@ async def handle_unknown_message(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     await update.message.reply_text(
-        "🤔 Не понял твоего сообщения. Используй кнопку 'Создать форму' для начала работы.",
+        "🤔 Не понял вашего сообщения. Используйте кнопку '📝 Создать форму' для начала работы.",
         reply_markup=MAIN_MENU_KEYBOARD
     )
-
-
-import os
 
 
 def main():
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     webhook_url = os.environ.get("WEBHOOK_URL")
-
     port = int(os.environ.get("PORT", 8000))
 
     if not token:
-        raise ValueError("TELEGRAM_BOT_TOKEN не установлен")
+        raise ValueError("TELEGRAM_BOT_TOKEN не установлен в переменных окружения")
 
     app = Application.builder().token(token).build()
 
     conv_handler = ConversationHandler(
         entry_points=[
-            CommandHandler('createForm', create_form),
-            MessageHandler(filters.Regex('^📝 Создать форму$'), create_form_button)
+            CommandHandler('createForm', create_form_start),
+            MessageHandler(filters.Regex('^📝 Создать форму$'), create_form_start)
         ],
         states={
             QUEST_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_quest_name)],
@@ -433,12 +479,14 @@ def main():
         fallbacks=[CommandHandler('cancel', cancel)]
     )
 
+    # Регистрация обработчиков
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("admin", admin_help))
     app.add_handler(CommandHandler("users", show_users))
+    app.add_handler(CommandHandler("add_user", add_user))
+    app.add_handler(CommandHandler("del_user", remove_user))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_unknown_message))
-
 
     if webhook_url:
         logger.info(f"Запуск Webhook: {webhook_url} на порту {port}")
