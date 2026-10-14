@@ -20,6 +20,9 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+# httpx в INFO-режиме печатает в лог полный адрес запроса вместе с токеном бота — отключаем
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 load_dotenv()
 
