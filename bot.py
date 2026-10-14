@@ -33,8 +33,12 @@ BACKGROUND_COLOR = (16, 53, 71)  # Тёмно-синий
 TEXT_COLOR = (248, 241, 222)  # Бежевый / Белый
 ACCENT_COLOR = (253, 188, 58)  # Золотой / Жёлтый
 
-# Файл для сохранения разрешённых пользователей
-USERS_FILE = 'allowed_users.json'
+# Файл для сохранения разрешённых пользователей.
+# На Railway его нужно хранить на подключённом Volume (постоянный диск),
+# иначе файл стирается при каждом новом деплое.
+DATA_DIR = os.environ.get('DATA_DIR') or os.environ.get('RAILWAY_VOLUME_MOUNT_PATH') or '.'
+os.makedirs(DATA_DIR, exist_ok=True)
+USERS_FILE = os.path.join(DATA_DIR, 'allowed_users.json')
 ADMIN_USER_ID = int(os.environ.get('ADMIN_USER_ID', 0))  # ID главного администратора
 
 
@@ -230,7 +234,7 @@ async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Эта команда только для главного администратора.")
         return
 
-    user_list = "\n".join([f"• `{u}`" for u in ALLOWED_USERS]) if ALLOWED_USERS else "Список пуст"
+    user_list = "\n".join([f"• <code>{u}</code>" for u in ALLOWED_USERS]) if ALLOWED_USERS else "Список пуст"
 
     await update.message.reply_text(
         f"🛠️ <b>Административные команды:</b>\n\n"
@@ -312,6 +316,15 @@ async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Пользователь не найден в списке.")
     except ValueError:
         await update.message.reply_text("❌ Ошибка: ID должен быть числом.")
+
+
+async def my_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает Telegram ID пользователя (доступно всем) — чтобы админ мог выдать доступ"""
+    await update.message.reply_text(
+        f"Твой Telegram ID: <code>{update.effective_user.id}</code>\n"
+        "Отправь его администратору, чтобы получить доступ к боту.",
+        parse_mode='HTML'
+    )
 
 
 # --- Основные функции и ConversationHandler ---
@@ -481,6 +494,7 @@ def main():
 
     # Регистрация обработчиков
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("myid", my_id))
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("admin", admin_help))
     app.add_handler(CommandHandler("users", show_users))
